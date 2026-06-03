@@ -15,11 +15,13 @@ import type { Plugin } from 'vite'
 import { watch as fsWatch } from 'node:fs'
 import * as fsp from 'node:fs/promises'
 import * as path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const CLIENT_SHIM = path.join(here, 'client-fs.js')
+const CLIENT_SPACES = path.join(here, 'client-spaces.js')
 
 export interface DevFsOptions {
   /** Globs the vite watcher should ignore, so app writes don't trigger HMR
@@ -40,10 +42,23 @@ export function devFs(options: DevFsOptions = {}): Plugin {
       if (id === 'fs' || id === 'node:fs') return CLIENT_SHIM
       return null
     },
+    // Inject the spaces substrate before app code so the (unmodified) SDK finds
+    // its runtime global. Serve-only, so it never ships to `vite build`.
+    transformIndexHtml() {
+      return [{
+        tag: 'script',
+        attrs: { type: 'module', src: '/__devfs/spaces/client.js' },
+        injectTo: 'head-prepend',
+      }]
+    },
     configureServer(server) {
       const root = server.config.root
-      // More specific route first: it fully handles the request (never next()),
-      // so the generic /__devfs handler never sees watch traffic.
+      const spaces = createSpaces(root)
+      // More specific routes first: each fully handles its request (never
+      // next()), so the generic /__devfs handler never sees their traffic.
+      server.middlewares.use('/__devfs/spaces/events', spaces.events)
+      server.middlewares.use('/__devfs/spaces/client.js', spaces.client)
+      server.middlewares.use('/__devfs/spaces', spaces.rpc)
       server.middlewares.use('/__devfs/watch', watchHandler(root))
       server.middlewares.use('/__devfs', rpcHandler(root))
     },
@@ -248,6 +263,135 @@ function watchHandler(root: string) {
       watcher?.close()
     })
   }
+}
+
+// --- spaces (Firestore-backed user filesystems, dev emulation) -------------
+//
+// On immediately.run, apps call the SDK's openAppSpace/createSpace/mountSpace;
+// the host mounts a Firestore-backed "space" at /spaces/{id} and exposes a
+// runtime global (`module.evaluation.module.bundler.{mounts, messageBus}`) the
+// SDK talks to. There is no host under `vite dev`, so we emulate that contract:
+//
+//   - each space is a real directory at <root>/spaces/{id} (so the existing fs
+//     bridge reads/writes it at /spaces/{id} with no special-casing),
+//   - a registry at <root>/.devfs/spaces.json tracks names, slot bindings, and
+//     which spaces are currently "mounted",
+//   - this server answers the SDK's `spaces` protocol over /__devfs/spaces and
+//     streams mount-set changes over /__devfs/spaces/events (SSE),
+//   - client-spaces.js installs the runtime global in the browser, so the
+//     unmodified SDK works exactly as in production.
+
+interface SpaceMeta { name: string; owner: string; createdAt: number }
+interface SpacesReg {
+  spaces: Record<string, SpaceMeta>
+  slots: Record<string, string>      // slot name -> spaceId (dev: one user, no appKey)
+  bindings: Record<string, true>     // spaceId -> bound to this app
+  mounted: string[]                  // spaceIds currently mounted
+}
+type SpaceResult = { ok: true; data: unknown } | { ok: false; code: string; message: string }
+
+function createSpaces(root: string) {
+  const dir = path.join(root, '.devfs')
+  const regFile = path.join(dir, 'spaces.json')
+  const spacesRoot = path.join(root, 'spaces')
+  const clients = new Set<ServerResponse>()
+
+  const load = async (): Promise<SpacesReg> => {
+    try {
+      const reg = JSON.parse(await fsp.readFile(regFile, 'utf8')) as Partial<SpacesReg>
+      return { spaces: {}, slots: {}, bindings: {}, mounted: [], ...reg }
+    } catch {
+      return { spaces: {}, slots: {}, bindings: {}, mounted: [] }
+    }
+  }
+  const save = async (reg: SpacesReg): Promise<void> => {
+    await fsp.mkdir(dir, { recursive: true })
+    await fsp.writeFile(regFile, JSON.stringify(reg, null, 2))
+  }
+  const descriptor = (id: string) => ({ path: `/spaces/${id}`, type: 'firestore', id })
+  const mountList = (reg: SpacesReg) => reg.mounted.filter((id) => reg.spaces[id]).map(descriptor)
+  const broadcast = (reg: SpacesReg): void => {
+    const payload = `data: ${JSON.stringify({ mounts: mountList(reg) })}\n\n`
+    for (const res of clients) res.write(payload)
+  }
+  const mount = async (reg: SpacesReg, id: string): Promise<void> => {
+    if (!reg.mounted.includes(id)) { reg.mounted.push(id); await save(reg); broadcast(reg) }
+  }
+
+  const handle = async (method: string, q: Record<string, any>): Promise<SpaceResult> => {
+    const reg = await load()
+    switch (method) {
+      case 'open': {
+        const slot = q.slot || 'default'
+        const id = reg.slots[slot]
+        if (id && reg.spaces[id]) { await mount(reg, id); return { ok: true, data: descriptor(id) } }
+        return { ok: false, code: 'needs-choice', message: `no workspace bound to slot "${slot}"` }
+      }
+      case 'create': {
+        const id = randomUUID().slice(0, 8)
+        await fsp.mkdir(path.join(spacesRoot, id), { recursive: true })
+        reg.spaces[id] = { name: q.name || `space-${id}`, owner: 'dev', createdAt: Date.now() }
+        if (q.bindToApp) { reg.bindings[id] = true; reg.slots[q.slot || 'default'] = id }
+        await mount(reg, id)
+        return { ok: true, data: descriptor(id) }
+      }
+      case 'mount': {
+        const id = q.spaceId
+        if (!id || !reg.spaces[id]) return { ok: false, code: 'not-found', message: `no such space: ${id}` }
+        if (q.slot) { reg.slots[q.slot] = id }
+        await mount(reg, id)
+        return { ok: true, data: descriptor(id) }
+      }
+      case 'list': {
+        let entries = Object.entries(reg.spaces)
+        if (q.app) entries = entries.filter(([id]) => reg.bindings[id])
+        return { ok: true, data: entries.map(([spaceId, s]) => ({ spaceId, role: 'owner', owner: s.owner, name: s.name })) }
+      }
+      case 'unmount': {
+        reg.mounted = reg.mounted.filter((x) => x !== q.spaceId)
+        await save(reg); broadcast(reg)
+        return { ok: true, data: null }
+      }
+      default:
+        return { ok: false, code: 'unknown', message: `unknown spaces method: ${method}` }
+    }
+  }
+
+  const rpc = (req: IncomingMessage, res: ServerResponse): void => {
+    if (req.method !== 'POST') { res.statusCode = 405; res.end('method not allowed'); return }
+    let body = ''
+    req.on('data', (c) => { body += c })
+    req.on('error', () => sendJson(res, { ok: false, code: 'unknown', message: 'request error' }))
+    req.on('end', async () => {
+      try {
+        const { method, query } = JSON.parse(body || '{}') as { method: string; query?: Record<string, any> }
+        sendJson(res, await handle(method, query ?? {}))
+      } catch (err) {
+        sendJson(res, { ok: false, code: 'unknown', message: String((err as Error)?.message ?? err) })
+      }
+    })
+  }
+
+  const events = (req: IncomingMessage, res: ServerResponse): void => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
+    res.write('retry: 1000\n\n')
+    clients.add(res)
+    void load().then((reg) => res.write(`data: ${JSON.stringify({ mounts: mountList(reg) })}\n\n`))
+    const heartbeat = setInterval(() => res.write(': hb\n\n'), 30000)
+    req.on('close', () => { clearInterval(heartbeat); clients.delete(res) })
+  }
+
+  const client = async (_req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    try {
+      res.setHeader('Content-Type', 'text/javascript')
+      res.end(await fsp.readFile(CLIENT_SPACES, 'utf8'))
+    } catch {
+      res.statusCode = 404
+      res.end('// dev-fs: client-spaces.js not found (run the dev-fs build)')
+    }
+  }
+
+  return { rpc, events, client }
 }
 
 // connect augments IncomingMessage with originalUrl

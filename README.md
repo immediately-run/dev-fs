@@ -106,6 +106,42 @@ Node callback forms on the default export (e.g. `fs.readFile(path, cb)`).
 - **Dev-only:** the plugin sets `apply: 'serve'`, so it is absent from
   production builds and has no effect on immediately.run.
 
+## Spaces (Firestore-backed filesystems)
+
+On immediately.run, apps can request **spaces** — Firestore-backed user
+filesystems — through `@immediately-run/sdk` (`openAppSpace`, `createSpace`,
+`mountSpace`, `listSpaces`, `unmountSpace`). The host signs the user in, renders
+the create / pick UI, mounts the space at `/spaces/{id}`, and exposes a runtime
+global the SDK talks to. Once mounted, a space is read and written through the
+ordinary `fs` module at its mount path — no separate API.
+
+There is no host under `vite dev`, so this plugin **emulates** it, letting the
+**unmodified** SDK work locally exactly as it does in production:
+
+```
+app code → @immediately-run/sdk (unchanged)
+              │  reads module.evaluation.module.bundler.{mounts, messageBus}
+              ▼
+       client-spaces.js (installed in <head>, before app code)
+              →  POST /__devfs/spaces        →  registry + node:fs   (open/create/mount/list/unmount)
+              →  SSE  /__devfs/spaces/events  ←  mount-set changes    (so useMounts/waitForMount fire)
+```
+
+- Each space is a **real directory** at `<project>/spaces/{id}`, so the existing
+  `fs` bridge reads and writes it at `/spaces/{id}` with no special-casing.
+- A registry at `<project>/.devfs/spaces.json` tracks space names, slot bindings,
+  and which spaces are mounted.
+- When the SDK calls `openAppSpace()` on an unbound slot, the plugin renders a
+  minimal create-or-pick dialog in the page — the local stand-in for the host's
+  sign-in / create UX. `createSpace` / `mountSpace` need no dialog.
+
+This is **dev-only**, like the `fs` bridge: the substrate is injected via
+`transformIndexHtml` under `apply: 'serve'` and is absent from `vite build`. No
+app code changes are needed — import the real SDK; it just works in both places.
+
+Add `spaces/` and `.devfs/` to your `.gitignore` so dev space data isn't
+committed.
+
 ## How it works
 
 `resolveId` redirects the bare `'fs'` / `'node:fs'` specifier to a browser shim
