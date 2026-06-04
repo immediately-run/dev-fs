@@ -10,9 +10,11 @@ filesystem when you run the app locally with Vite, so `import 'fs'` would
 normally fail in the browser.
 
 This plugin fills that gap: during `vite dev` it serves a browser shim in place
-of the `fs` builtin and bridges every call to your **real local disk**, rooted
-at the project directory. It is **dev-only** — it never runs in `vite build`,
-and on immediately.run the real ZenFS is used instead.
+of the `fs` builtin and bridges every call to your **real local disk**,
+chrooted to the project directory and laid out like the hosted sandbox (the
+repo at `/app`, scratch elsewhere — see [Filesystem layout](#filesystem-layout)).
+It is **dev-only** — it never runs in `vite build`, and on immediately.run the
+real ZenFS is used instead.
 
 ```
 app code  →  fs shim (browser)  →  HTTP /__devfs      →  node:fs   (read/write/stat/…)
@@ -67,8 +69,21 @@ for await (const ev of fs.promises.watch('/data', { recursive: true })) {
 }
 ```
 
-Paths are rooted at your project directory, matching the sandbox: an app path
-of `/src/App.tsx` maps to `<project>/src/App.tsx` on disk.
+## Filesystem layout
+
+The virtual filesystem mirrors the hosted sandbox, chrooted to your project
+directory:
+
+| app path | disk path | what it is |
+| --- | --- | --- |
+| `/app/...` | `<project>/...` | the repo itself, as in prod |
+| everything else under `/` | `<project>/.devfs/root/...` | scratch space |
+| `/spaces/{id}` | `<project>/.devfs/root/spaces/{id}` | dev space data |
+
+So `/app/src/App.tsx` reads `<project>/src/App.tsx` on disk, a listing of `/`
+shows `app` (the repo mount point) next to whatever scratch entries exist, and
+**relative paths resolve against `/app`** — the sandbox's working directory.
+Nothing dev-fs does ever touches disk outside the project directory.
 
 ## Options
 
@@ -77,8 +92,8 @@ devFs({
   // Globs the Vite file watcher should ignore, so writes your app makes during
   // dev don't trigger HMR reloads. The plugin's own `watch` uses an independent
   // fs.watch, so it still reports these changes.
-  // Default: ['**/devfs-playground/**']
-  ignore: ['**/my-scratch-dir/**'],
+  // Default: ['**/.devfs/**', '**/devfs-playground/**']
+  ignore: ['**/.devfs/**', '**/my-scratch-dir/**'],
 })
 ```
 
@@ -127,8 +142,9 @@ app code → @immediately-run/sdk (unchanged)
               →  SSE  /__devfs/spaces/events  ←  mount-set changes    (so useMounts/waitForMount fire)
 ```
 
-- Each space is a **real directory** at `<project>/spaces/{id}`, so the existing
-  `fs` bridge reads and writes it at `/spaces/{id}` with no special-casing.
+- Each space is a **real directory** at `<project>/.devfs/root/spaces/{id}` —
+  `/spaces/{id}` in the virtual layout — so the existing `fs` bridge reads and
+  writes it with no special-casing.
 - A registry at `<project>/.devfs/spaces.json` tracks space names, slot bindings,
   and which spaces are mounted.
 - When the SDK calls `openAppSpace()` on an unbound slot, the plugin renders a
@@ -139,7 +155,7 @@ This is **dev-only**, like the `fs` bridge: the substrate is injected via
 `transformIndexHtml` under `apply: 'serve'` and is absent from `vite build`. No
 app code changes are needed — import the real SDK; it just works in both places.
 
-Add `spaces/` and `.devfs/` to your `.gitignore` so dev space data isn't
+Add `.devfs/` to your `.gitignore` so dev scratch and space data isn't
 committed.
 
 ## How it works

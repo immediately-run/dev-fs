@@ -1,9 +1,10 @@
 // vite-plugin-dev-fs — makes `import ... from 'fs'` work during local `vite dev`.
 //
 // On immediately.run the app's `fs` import resolves to a ZenFS bound context
-// (async-only: `fs.promises.*` + callback style) backed by the parent window
-// over a MessagePort, rooted at the project root. Locally there is no such
-// bridge, so this plugin recreates the same contract over the dev server:
+// (async-only: `fs.promises.*` + callback style) rooted at `/`, with the repo
+// mounted at /app over a MessagePort to the parent window and pwd = /app.
+// Locally there is no such bridge, so this plugin recreates the same contract
+// (including the /app layout — see "path scoping" below) over the dev server:
 //
 //   app code  →  client-fs.js shim  →  HTTP /__devfs  →  node:fs (this file)
 //                                    →  SSE  /__devfs/watch  ←  fs.watch
@@ -30,7 +31,9 @@ export interface DevFsOptions {
 }
 
 export function devFs(options: DevFsOptions = {}): Plugin {
-  const ignore = options.ignore ?? ['**/devfs-playground/**']
+  // `.devfs` holds the scratch root (virtual `/` outside /app) and the spaces
+  // registry — app writes there must not bounce the vite watcher.
+  const ignore = options.ignore ?? ['**/.devfs/**', '**/devfs-playground/**']
   return {
     name: 'immediately-dev-fs',
     apply: 'serve',
@@ -53,6 +56,9 @@ export function devFs(options: DevFsOptions = {}): Plugin {
     },
     configureServer(server) {
       const root = server.config.root
+      // Materialize the scratch root so virtual `/` stats/watches from the
+      // first request (readdir of `/` tolerates its absence regardless).
+      void fsp.mkdir(scratchDir(root), { recursive: true }).catch(() => {})
       const spaces = createSpaces(root)
       // More specific routes first: each fully handles its request (never
       // next()), so the generic /__devfs handler never sees their traffic.
@@ -66,6 +72,24 @@ export function devFs(options: DevFsOptions = {}): Plugin {
 }
 
 // --- path scoping ----------------------------------------------------------
+//
+// The sandbox filesystem layout on immediately.run: the repo is mounted at
+// /app, and the rest of `/` is scratch space (plus dynamic mounts like
+// /spaces/{id}). Dev mirrors that layout, chrooted to the project directory:
+//
+//   virtual /app/...   →  <project>/...              (the repo itself)
+//   virtual /<else>    →  <project>/.devfs/root/...  (scratch)
+//
+// Relative paths resolve against /app, matching the sandbox's pwd.
+
+/** The repo's mount point in the sandbox filesystem. */
+const APP_ROOT = '/app'
+
+/** On-disk home of the virtual root outside /app — scratch space, kept inside
+ *  the project so dev-fs never touches anything beyond it. */
+function scratchDir(root: string): string {
+  return path.join(root, '.devfs', 'root')
+}
 
 function fsError(code: string, message: string, p?: string): NodeJS.ErrnoException {
   const e = new Error(`${code}: ${message}`) as NodeJS.ErrnoException
@@ -74,23 +98,51 @@ function fsError(code: string, message: string, p?: string): NodeJS.ErrnoExcepti
   return e
 }
 
-/** Map an app-rooted path (`/src/App.tsx`) to a real disk path under `root`,
- *  rejecting any path that escapes the project root. */
-function resolveSafe(root: string, p: unknown): string {
+/** Normalize an app path to a clean absolute virtual path. Relative paths
+ *  resolve against /app (the sandbox's pwd). `..` is collapsed here, in
+ *  virtual space, so `/spaces/../app/x` resolves like it would in prod and a
+ *  leading `..` clamps at `/` instead of escaping a disk base. */
+function virtualPath(p: unknown): string {
   if (typeof p !== 'string') throw fsError('EINVAL', 'path must be a string')
-  const rel = p.replace(/^[\\/]+/, '')
-  const abs = path.resolve(root, rel)
-  if (abs !== root && !abs.startsWith(root + path.sep)) {
-    throw fsError('EACCES', `path escapes project root: ${p}`, p)
+  const norm = path.posix.normalize(p.startsWith('/') ? p : `${APP_ROOT}/${p}`)
+  return norm.length > 1 ? norm.replace(/\/+$/, '') : norm
+}
+
+/** Map an app path to a real disk path: `/app/...` lands in the project root
+ *  (the repo, as in prod), everything else in the scratch dir. The escape
+ *  check is defense in depth — `..` is already collapsed by virtualPath; this
+ *  catches platform oddities like `\` separators on Windows. */
+function resolveSafe(root: string, p: unknown): string {
+  const v = virtualPath(p)
+  const inApp = v === APP_ROOT || v.startsWith(APP_ROOT + '/')
+  // `.devfs` is this plugin's own on-disk state, which the chroot forces inside
+  // the project dir — but prod's /app has no such entry. Reaching it through
+  // /app would alias the scratch tree (a recursive copy of /app could even
+  // copy scratch into itself), so it's reserved: hidden from /app listings
+  // (see readdir) and rejected here.
+  if (v === `${APP_ROOT}/.devfs` || v.startsWith(`${APP_ROOT}/.devfs/`)) {
+    throw fsError('EACCES', `path is reserved by dev-fs: ${v}`, v)
+  }
+  const base = inApp ? root : scratchDir(root)
+  const rel = (inApp ? v.slice(APP_ROOT.length) : v).replace(/^\/+/, '')
+  const abs = path.resolve(base, rel)
+  if (abs !== base && !abs.startsWith(base + path.sep)) {
+    throw fsError('EACCES', `path escapes project root: ${v}`, v)
   }
   return abs
 }
 
-/** Inverse of resolveSafe: a real disk path back to an app-rooted path. */
+/** Inverse of resolveSafe: a real disk path back to a virtual path. Scratch is
+ *  checked first since it lives inside the project root. */
 function toAppPath(root: string, abs: string): string {
-  const rel = path.relative(root, abs)
-  if (!rel || rel === '') return '/'
-  return '/' + rel.split(path.sep).join('/')
+  for (const [base, prefix] of [[scratchDir(root), ''], [root, APP_ROOT]] as const) {
+    const rel = path.relative(base, abs)
+    if (rel === '') return prefix || '/'
+    if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+      return `${prefix}/${rel.split(path.sep).join('/')}`
+    }
+  }
+  return APP_ROOT // unreachable for paths produced by resolveSafe
 }
 
 // --- request/response ops --------------------------------------------------
@@ -144,13 +196,40 @@ async function handleOp(root: string, op: string, args: unknown[]): Promise<Wire
       return { t: 'u' }
     case 'readdir': {
       const options = args[1] as { withFileTypes?: boolean } | undefined
+      // The virtual root lists the scratch dir plus a synthesized `app` entry —
+      // the repo mount point, just as the sandbox shows it. Scratch may not
+      // exist yet on a fresh project; treat that as empty rather than ENOENT.
+      // `/app` hides `.devfs` (reserved — see resolveSafe).
+      const v = virtualPath(args[0])
+      const isRoot = v === '/'
+      const hidden = isRoot ? 'app' : v === APP_ROOT ? '.devfs' : null
       if (options?.withFileTypes) {
-        const ents = await fsp.readdir(p0(), { withFileTypes: true })
-        return { t: 'j', v: ents.map((e) => ({
-          name: e.name, dir: e.isDirectory(), file: e.isFile(), symlink: e.isSymbolicLink(),
-        })) }
+        let ents: import('node:fs').Dirent[] = []
+        try {
+          ents = await fsp.readdir(p0(), { withFileTypes: true })
+        } catch (err) {
+          if (!isRoot || (err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+        }
+        // A stray on-disk `app` in scratch is unreachable through the virtual
+        // tree (that prefix always maps to the repo) — drop it over duplicating.
+        const list = ents
+          .filter((e) => e.name !== hidden)
+          .map((e) => ({
+            name: e.name, dir: e.isDirectory(), file: e.isFile(), symlink: e.isSymbolicLink(),
+          }))
+        if (isRoot) {
+          list.unshift({ name: 'app', dir: true, file: false, symlink: false })
+        }
+        return { t: 'j', v: list }
       }
-      return { t: 'j', v: await fsp.readdir(p0()) }
+      let names: string[] = []
+      try {
+        names = await fsp.readdir(p0())
+      } catch (err) {
+        if (!isRoot || (err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      }
+      names = names.filter((n) => n !== hidden)
+      return { t: 'j', v: isRoot ? ['app', ...names] : names }
     }
     case 'mkdir': {
       const r = await fsp.mkdir(p0(), args[1] as Parameters<typeof fsp.mkdir>[1])
@@ -272,8 +351,9 @@ function watchHandler(root: string) {
 // runtime global (`module.evaluation.module.bundler.{mounts, messageBus}`) the
 // SDK talks to. There is no host under `vite dev`, so we emulate that contract:
 //
-//   - each space is a real directory at <root>/spaces/{id} (so the existing fs
-//     bridge reads/writes it at /spaces/{id} with no special-casing),
+//   - each space is a real directory at <root>/.devfs/root/spaces/{id} — i.e.
+//     /spaces/{id} in the virtual layout — so the existing fs bridge
+//     reads/writes it with no special-casing,
 //   - a registry at <root>/.devfs/spaces.json tracks names, slot bindings, and
 //     which spaces are currently "mounted",
 //   - this server answers the SDK's `spaces` protocol over /__devfs/spaces and
@@ -293,10 +373,35 @@ type SpaceResult = { ok: true; data: unknown } | { ok: false; code: string; mess
 function createSpaces(root: string) {
   const dir = path.join(root, '.devfs')
   const regFile = path.join(dir, 'spaces.json')
-  const spacesRoot = path.join(root, 'spaces')
+  const spacesRoot = path.join(scratchDir(root), 'spaces')
   const clients = new Set<ServerResponse>()
 
+  // One-time migration from the pre-/app layout, where virtual `/` mapped
+  // straight to the project dir and space data lived at <root>/spaces/{id}.
+  // Move each space dir into the scratch tree so existing registries keep
+  // working, and drop the legacy dir if that empties it. Every spaces request
+  // awaits this (via load), so it always wins the race.
+  // Only ids the registry knows are moved — a repo's own `spaces/` dir (or
+  // anything else in one) is none of our business.
+  const migrated = (async () => {
+    let ids: string[] = []
+    try {
+      const reg = JSON.parse(await fsp.readFile(regFile, 'utf8')) as Partial<SpacesReg>
+      ids = Object.keys(reg.spaces ?? {})
+    } catch { return } // no registry — nothing to migrate
+    const legacy = path.join(root, 'spaces')
+    let names: string[] = []
+    try { names = await fsp.readdir(legacy) } catch { return } // no legacy dir
+    await fsp.mkdir(spacesRoot, { recursive: true })
+    for (const name of names.filter((n) => ids.includes(n))) {
+      await fsp.rename(path.join(legacy, name), path.join(spacesRoot, name))
+        .catch(() => { /* already migrated or not movable — leave it */ })
+    }
+    await fsp.rmdir(legacy).catch(() => { /* not empty — leave it */ })
+  })()
+
   const load = async (): Promise<SpacesReg> => {
+    await migrated
     try {
       const reg = JSON.parse(await fsp.readFile(regFile, 'utf8')) as Partial<SpacesReg>
       return { spaces: {}, slots: {}, bindings: {}, mounted: [], ...reg }
