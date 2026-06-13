@@ -346,7 +346,7 @@ function watchHandler(root: string) {
 
 // --- spaces (Firestore-backed user filesystems, dev emulation) -------------
 //
-// On immediately.run, apps call the SDK's openAppSpace/createSpace/mountSpace;
+// On immediately.run, apps call the SDK's createSpace/mountSpace/requestMount;
 // the host mounts a Firestore-backed "space" at /spaces/{id} and exposes a
 // runtime global (`module.evaluation.module.bundler.{mounts, messageBus}`) the
 // SDK talks to. There is no host under `vite dev`, so we emulate that contract:
@@ -354,8 +354,8 @@ function watchHandler(root: string) {
 //   - each space is a real directory at <root>/.devfs/root/spaces/{id} — i.e.
 //     /spaces/{id} in the virtual layout — so the existing fs bridge
 //     reads/writes it with no special-casing,
-//   - a registry at <root>/.devfs/spaces.json tracks names, slot bindings, and
-//     which spaces are currently "mounted",
+//   - a registry at <root>/.devfs/spaces.json tracks names and which spaces are
+//     currently "mounted",
 //   - this server answers the SDK's `spaces` protocol over /__devfs/spaces and
 //     streams mount-set changes over /__devfs/spaces/events (SSE),
 //   - client-spaces.js installs the runtime global in the browser, so the
@@ -364,8 +364,7 @@ function watchHandler(root: string) {
 interface SpaceMeta { name: string; owner: string; createdAt: number }
 interface SpacesReg {
   spaces: Record<string, SpaceMeta>
-  slots: Record<string, string>      // slot name -> spaceId (dev: one user, no appKey)
-  bindings: Record<string, true>     // spaceId -> bound to this app
+  bindings: Record<string, true>     // spaceId -> known to this app (powers list({app}))
   mounted: string[]                  // spaceIds currently mounted
 }
 type SpaceResult = { ok: true; data: unknown } | { ok: false; code: string; message: string }
@@ -404,9 +403,9 @@ function createSpaces(root: string) {
     await migrated
     try {
       const reg = JSON.parse(await fsp.readFile(regFile, 'utf8')) as Partial<SpacesReg>
-      return { spaces: {}, slots: {}, bindings: {}, mounted: [], ...reg }
+      return { spaces: {}, bindings: {}, mounted: [], ...reg }
     } catch {
-      return { spaces: {}, slots: {}, bindings: {}, mounted: [] }
+      return { spaces: {}, bindings: {}, mounted: [] }
     }
   }
   const save = async (reg: SpacesReg): Promise<void> => {
@@ -426,24 +425,20 @@ function createSpaces(root: string) {
   const handle = async (method: string, q: Record<string, any>): Promise<SpaceResult> => {
     const reg = await load()
     switch (method) {
-      case 'open': {
-        const slot = q.slot || 'default'
-        const id = reg.slots[slot]
-        if (id && reg.spaces[id]) { await mount(reg, id); return { ok: true, data: descriptor(id) } }
-        return { ok: false, code: 'needs-choice', message: `no workspace bound to slot "${slot}"` }
-      }
+      // (`open`/slot per-app-space emulation removed — the host no longer has it;
+      // apps use the per-user settings mount or mount a space by id / the powerbox.)
       case 'create': {
         const id = randomUUID().slice(0, 8)
         await fsp.mkdir(path.join(spacesRoot, id), { recursive: true })
         reg.spaces[id] = { name: q.name || `space-${id}`, owner: 'dev', createdAt: Date.now() }
-        if (q.bindToApp) { reg.bindings[id] = true; reg.slots[q.slot || 'default'] = id }
+        reg.bindings[id] = true
         await mount(reg, id)
         return { ok: true, data: descriptor(id) }
       }
       case 'mount': {
         const id = q.spaceId
         if (!id || !reg.spaces[id]) return { ok: false, code: 'not-found', message: `no such space: ${id}` }
-        if (q.slot) { reg.slots[q.slot] = id }
+        reg.bindings[id] = true
         await mount(reg, id)
         return { ok: true, data: descriptor(id) }
       }
