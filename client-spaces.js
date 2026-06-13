@@ -5,9 +5,10 @@
 //   module.evaluation.module.bundler.mounts       (a MountService)
 //   module.evaluation.module.bundler.messageBus   (protocolRequest, ...)
 // There is no host under `vite dev`, so we install the same global here, backed
-// by the dev server: the `spaces` protocol over POST /__devfs/spaces, and the
-// mount-set event source over SSE /__devfs/spaces/events. The result is that the
-// UNMODIFIED @immediately-run/sdk works locally exactly as it does in prod.
+// by the dev server: the `spaces` and `settings` protocols over POST
+// /__devfs/spaces, and the mount-set event source over SSE /__devfs/spaces/events.
+// The result is that the UNMODIFIED @immediately-run/sdk works locally exactly as
+// it does in prod (openSettings/mountSpace/createSpace/requestMount).
 //
 // Plain JS on purpose — it is not type-checked or linted, imports nothing, and
 // must run before app code (hence head-prepend).
@@ -85,13 +86,20 @@ async function post(method, query) {
 }
 
 async function protocolRequest(protocol, method, params) {
-  if (protocol !== 'spaces') {
-    return { ok: false, code: 'unknown', message: `dev-fs: protocol "${protocol}" not supported locally` }
-  }
   const query = (params && params[0]) || {}
-  const res = await post(method, query)
-  if (res && res.ok) addMount(res.data)
-  return res
+  if (protocol === 'spaces') {
+    const res = await post(method, query)
+    if (res && res.ok) addMount(res.data)
+    return res
+  }
+  // Per-user settings space: `open`/`openOf` resolve a mount (surface it like a
+  // space); `importFromParent` returns a plain { copied } result (no mount).
+  if (protocol === 'settings') {
+    const res = await post('settings:' + method, query)
+    if (res && res.ok && method !== 'importFromParent') addMount(res.data)
+    return res
+  }
+  return { ok: false, code: 'unknown', message: `dev-fs: protocol "${protocol}" not supported locally` }
 }
 
 const messageBus = {
