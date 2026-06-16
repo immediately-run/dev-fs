@@ -427,6 +427,20 @@ function createSpaces(root: string) {
     switch (method) {
       // (`open`/slot per-app-space emulation removed — the host no longer has it;
       // apps use the per-user settings mount or mount a space by id / the powerbox.)
+
+      // Per-user settings space (UI_AS_APPS_SPEC §3.3/§8.2). Dev is single-app /
+      // single-user, so there is one settings dir at /settings (no appKey chroot).
+      // `openOf` (the elevated file-commander) resolves to the same dir locally.
+      case 'settings:open':
+      case 'settings:openOf': {
+        const dir = path.join(scratchDir(root), 'settings')
+        await fsp.mkdir(dir, { recursive: true })
+        return { ok: true, data: { path: '/settings', type: 'firestore', id: 'settings:dev' } }
+      }
+      // No parent settings to seed from under vite dev.
+      case 'settings:importFromParent':
+        return { ok: true, data: { copied: 0 } }
+
       case 'create': {
         const id = randomUUID().slice(0, 8)
         await fsp.mkdir(path.join(spacesRoot, id), { recursive: true })
