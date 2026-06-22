@@ -45,6 +45,7 @@
   ],
   "scripts": {
     "build": "tsc && cp client-fs.js client-spaces.js dist/",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
