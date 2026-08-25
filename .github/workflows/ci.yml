@@ -1,0 +1,55 @@
+name: ci
+
+# Type-check + the fs-types contract on every PR + push; publish to npm on push
+# to main via npm trusted publishing (OIDC), mirroring platform-constants /
+# sandbox-protocol / the SDK release job.
+#
+# NOTE (R3-276b rollout): `npm test` installs `@immediately-run/sdk@>=0.49.0` into
+# its fixture — the first SDK version whose ambient declarations include `fs`.
+# CI on a PR opened before that version exists will fail ETARGET by design;
+# merge order is SDK first, then this.
+#
+# npm trusted publishing must be configured for @immediately-run/dev-fs on
+# npmjs.com before the first publish succeeds (0.3.0 predates this workflow and
+# was published manually). Until the trust link exists the publish step fails;
+# everything before it still runs.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  typecheck-test-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false # never cache in release builds
+      # Trusted publishing requires npm >= 11.5.1
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm run typecheck
+      # The ./fs types entry must stay a pure re-reference of the SDK's ambient
+      # declaration (R3-276b): no second copy, no widened surface, no *Sync.
+      - run: npm run test:selftest
+      - run: npm test
+      - name: Publish to npm via trusted publishing (skip if version already published)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          # setup-node's registry-url writes an .npmrc bound to NODE_AUTH_TOKEN.
+          # Clearing it forces OIDC trusted publishing instead of (empty) token auth.
+          NODE_AUTH_TOKEN: ""
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VER=$(node -p "require('./package.json').version")
+          if npm view "$PKG_NAME@$PKG_VER" version >/dev/null 2>&1; then
+            echo "::notice::$PKG_NAME@$PKG_VER already published — skipping."
+            exit 0
+          fi
+          npm publish --access public
