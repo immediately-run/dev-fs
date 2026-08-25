@@ -58,8 +58,9 @@ This types `import fs from 'fs'` **and** the ambient `module` global. (The `fs`
 declaration moved to the SDK in 0.4.0 — the package that owns the surface
 declares it. The older `/// <reference types="@immediately-run/dev-fs/fs" />`
 line keeps working during a deprecation window: it re-references the SDK's
-declaration, so the two can never drift. It needs `@immediately-run/sdk` ≥ 0.47.0
-installed; stay on dev-fs < 0.4.0 until you bump an older SDK pin.)
+declaration, so the two can never drift. It needs `@immediately-run/sdk` ≥ 0.49.0
+— the first release whose tarball carries `ambient-fs.d.ts` — installed; stay on
+dev-fs < 0.4.0 until you bump an older SDK pin.)
 
 Now `fs` works the same locally as it does on immediately.run:
 

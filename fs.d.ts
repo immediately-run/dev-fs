@@ -10,8 +10,9 @@
 // to the SDK's declaration, so there is exactly ONE copy of the `fs` surface and
 // this path can never drift from it.
 //
-// Requires the SDK's ambient `fs` declaration (sdk >= 0.47.0). An app still on an
-// older SDK pin should stay on dev-fs < 0.4.0 until it bumps the pin.
+// Requires the SDK's ambient `fs` declaration — complete from sdk 0.49.0 (0.47.0
+// published without `ambient-fs.d.ts`; an app on an older SDK pin should stay on
+// dev-fs < 0.4.0 until it bumps the pin).
 //
 // The Vite plugin this package ships (bridging the same `fs` surface to real disk
 // during `vite dev`) is unaffected — only the types entry changed.

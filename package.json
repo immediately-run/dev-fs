@@ -49,7 +49,7 @@
     "test:selftest": "node scripts/check-fs-types.mjs --self-test"
   },
   "peerDependencies": {
-    "@immediately-run/sdk": ">=0.47.0"
+    "@immediately-run/sdk": ">=0.49.0"
   },
   "devDependencies": {
     "@immediately-run/dev-fs": "file:",

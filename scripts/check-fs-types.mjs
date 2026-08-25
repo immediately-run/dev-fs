@@ -18,7 +18,7 @@
  *   - a drifted second copy (the failure mode `declare module` produces by
  *     MERGING instead of erroring) fails the probe.
  *
- * The SDK comes from the npm registry (`^0.47.0`, the first version whose
+ * The SDK comes from the npm registry (`>=0.49.0` — the first release whose tarball
  * ambient declarations include `fs`), installed INTO the fixture — this repo's
  * own lockfile stays dependency-free. For local verification against an
  * unpublished SDK, pass `--sdk <tarball-or-dir>` (npm pack the SDK checkout
@@ -77,7 +77,7 @@ const die = (msg) => {
 /**
  * A fixture app in the transition state: references BOTH the dev-fs path and the
  * SDK path (the two triple-slash lines every app repo carries mid-migration).
- * `sdkSpec` is what npm installs into the fixture ('^0.47.0' or a local
+ * `sdkSpec` is what npm installs into the fixture ('>=0.49.0' or a local
  * tarball); `fsDts` overrides the shipped fs.d.ts under self-test.
  */
 function makeFixture({ sdkSpec, fsDts }) {
@@ -126,7 +126,7 @@ const DRIFTED_COPY = `declare module 'fs' {
 export {};
 `;
 
-async function run({ sdkSpec = '^0.47.0' } = {}) {
+async function run({ sdkSpec = '>=0.49.0' } = {}) {
   if (!existsSync(TSC)) die('typescript not installed — run npm ci.');
   if (!existsSync(join(ROOT, 'fs.d.ts'))) die('fs.d.ts missing from the repo root.');
 
@@ -140,7 +140,7 @@ async function run({ sdkSpec = '^0.47.0' } = {}) {
   console.log(`✓ fs.d.ts is a pure re-reference (fixture: both references, sdk ${sdkSpec})`);
 }
 
-const selfTest = async ({ sdkSpec = '^0.47.0' } = {}) => {
+const selfTest = async ({ sdkSpec = '>=0.49.0' } = {}) => {
   if (!existsSync(TSC)) die('self-test needs typescript installed (npm ci).');
   const cases = [
     ['a drifted own-copy fs.d.ts is caught (merge, not error)', async () => {
