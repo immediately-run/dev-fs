@@ -46,12 +46,20 @@ export default defineConfig({
 ```
 
 For TypeScript types on the `fs` import (so app code type-checks without pulling
-all of `@types/node` into your browser project), add a one-line reference in any
-`.d.ts` file your `tsconfig` includes — for example `src/devfs.d.ts`:
+all of `@types/node` into your browser project), reference the SDK's **ambient
+declarations** — one line in any `.d.ts` file your `tsconfig` includes, for
+example `src/devfs.d.ts`:
 
 ```ts
-/// <reference types="@immediately-run/dev-fs/fs" />
+/// <reference types="@immediately-run/sdk/ambient" />
 ```
+
+This types `import fs from 'fs'` **and** the ambient `module` global. (The `fs`
+declaration moved to the SDK in 0.4.0 — the package that owns the surface
+declares it. The older `/// <reference types="@immediately-run/dev-fs/fs" />`
+line keeps working during a deprecation window: it re-references the SDK's
+declaration, so the two can never drift. It needs `@immediately-run/sdk` ≥ 0.47.0
+installed; stay on dev-fs < 0.4.0 until you bump an older SDK pin.)
 
 Now `fs` works the same locally as it does on immediately.run:
 
