@@ -105,12 +105,61 @@ async function protocolRequest(protocol, method, params) {
 const messageBus = {
   protocolRequest,
   sendMessage() {},
-  onMessage() { return () => {} },
+  // The SDK's transport contract (`HostTransport.onMessage`) returns a
+  // DISPOSABLE — `{ dispose() }` — not a plain function: `addListener` wraps it
+  // as `() => disposable.dispose()`, so returning a bare function made every
+  // unsubscribe throw under vite dev. No host messages are ever pushed locally,
+  // so subscribing is inert; disposing must simply be safe.
+  onMessage() { return { dispose() {} } },
 }
 
-// --- install the runtime global (merge; never clobber) ---------------------
+// --- local `fs` bridge at the SDK's sandbox-fs discovery global -------------
+//
+// The SDK discovers the sandbox ZenFS at `globalThis.__sandpackSharedFs`
+// (`sandboxFs()` in @immediately-run/sdk/fs — behind `openFs`, `readBlob`,
+// `readObjectUrl`, `useObjectUrl`, `MountImage`). On immediately.run the
+// sandbox publishes it; under `vite dev` nobody did, so those APIs failed
+// `unavailable` even though this plugin bridges `fs`. Publish the SAME bridge
+// here, at the SAME global, so the SDK's existing discovery path just works —
+// no SDK special-casing, no app changes.
+//
+// Published SYNCHRONOUSLY (the global must exist before app code boots and
+// calls `sandboxFs()`), forwarding each call to the real shim, which loads on
+// first use from /__devfs/client-fs.js — the same file the `fs` import
+// resolves to. That import is a second module instance, which is fine: the
+// shim is stateless per call (every op is a fetch to the dev server).
+let fsShim = null
+const loadFsShim = () => (fsShim ||= import('/__devfs/client-fs.js').then((m) => m.default))
+const fsForward = (name) => (...args) => loadFsShim().then((fs) => fs.promises[name](...args))
+const sharedFs = {
+  promises: {
+    readFile: fsForward('readFile'),
+    writeFile: fsForward('writeFile'),
+    appendFile: fsForward('appendFile'),
+    readdir: fsForward('readdir'),
+    mkdir: fsForward('mkdir'),
+    rm: fsForward('rm'),
+    rmdir: fsForward('rmdir'),
+    unlink: fsForward('unlink'),
+    stat: fsForward('stat'),
+    lstat: fsForward('lstat'),
+    access: fsForward('access'),
+    rename: fsForward('rename'),
+    copyFile: fsForward('copyFile'),
+    realpath: fsForward('realpath'),
+    // `watch` hands back an async iterable synchronously; the shim resolves
+    // inside the generator, before the first event is pulled.
+    async *watch(...args) {
+      const shim = await loadFsShim()
+      yield* shim.promises.watch(...args)
+    },
+  },
+}
+
+// --- install the runtime globals (merge; never clobber) --------------------
 
 const g = globalThis
+if (!g.__sandpackSharedFs) g.__sandpackSharedFs = sharedFs
 g.module = g.module || {}
 g.module.evaluation = g.module.evaluation || {}
 g.module.evaluation.module = g.module.evaluation.module || {}

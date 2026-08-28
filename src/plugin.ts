@@ -66,6 +66,10 @@ export function devFs(options: DevFsOptions = {}): Plugin {
       server.middlewares.use('/__devfs/spaces/client.js', spaces.client)
       server.middlewares.use('/__devfs/spaces', spaces.rpc)
       server.middlewares.use('/__devfs/watch', watchHandler(root))
+      // The fs shim at a stable URL, so the spaces substrate can lazy-import it
+      // for the `__sandpackSharedFs` bridge (a second instance of the same
+      // module the `fs` import resolves to — stateless, so that's harmless).
+      server.middlewares.use('/__devfs/client-fs.js', serveFile(CLIENT_SHIM))
       server.middlewares.use('/__devfs', rpcHandler(root))
     },
   }
@@ -298,6 +302,20 @@ function rpcHandler(root: string) {
 function sendJson(res: ServerResponse, payload: unknown) {
   res.setHeader('Content-Type', 'application/json')
   res.end(JSON.stringify(payload))
+}
+
+/** Serve one on-disk JS file verbatim (the client shim at its stable URL). */
+function serveFile(file: string) {
+  return async (_req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    try {
+      const body = await fsp.readFile(file, 'utf8')
+      res.setHeader('Content-Type', 'text/javascript')
+      res.end(body)
+    } catch {
+      res.statusCode = 404
+      res.end('// dev-fs: client-fs.js not found (run the dev-fs build)')
+    }
+  }
 }
 
 // --- watch (Server-Sent Events) --------------------------------------------
