@@ -1,6 +1,6 @@
 {
   "name": "@immediately-run/dev-fs",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Vite plugin that bridges immediately.run's async `fs` module (and Firestore-backed spaces) to your local disk during `vite dev`.",
   "type": "module",
   "license": "MIT",
@@ -45,7 +45,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/check-fs-types.mjs",
+    "build": "tsc && cp client-fs.js client-spaces.js dist/",
+    "test": "node scripts/check-fs-types.mjs && node --test scripts/check-client-substrate.mjs",
     "test:selftest": "node scripts/check-fs-types.mjs --self-test"
   },
   "peerDependencies": {

@@ -164,6 +164,21 @@ This is **dev-only**, like the `fs` bridge: the substrate is injected via
 `transformIndexHtml` under `apply: 'serve'` and is absent from `vite build`. No
 app code changes are needed — import the real SDK; it just works in both places.
 
+## SDK sandbox-fs discovery (`useObjectUrl`, `openFs`, `MountImage`)
+
+The SDK's typed filesystem surface (`@immediately-run/sdk/fs` — `openFs`,
+`readBlob`, `readObjectUrl` — and the `useObjectUrl` hook / `MountImage`
+component built on it) does not go through the `fs` import: it discovers the
+sandbox ZenFS at `globalThis.__sandpackSharedFs`. On immediately.run the sandbox
+publishes that global; before 0.5.0 nothing did locally, so those APIs failed
+with `unavailable` under `vite dev` even though `fs` itself was bridged.
+
+Since 0.5.0 the injected substrate also publishes the local-disk bridge at
+`__sandpackSharedFs` (synchronously, before app code runs), so the SDK's
+existing discovery path works unchanged: `useObjectUrl(mount, 'photos/cat.png')`
+reads your working tree / dev space directories and produces a real object URL
+locally, exactly as it does hosted. Dev-only, like everything else here.
+
 Add `.devfs/` to your `.gitignore` so dev scratch and space data isn't
 committed.
 
