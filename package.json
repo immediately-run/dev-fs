@@ -47,7 +47,9 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc && cp client-fs.js client-spaces.js dist/",
     "test": "node scripts/check-fs-types.mjs && node --test scripts/check-client-substrate.mjs",
-    "test:selftest": "node scripts/check-fs-types.mjs --self-test"
+    "test:selftest": "node scripts/check-fs-types.mjs --self-test",
+    "check:lock-version": "node scripts/check-lock-version.mjs --self-test && node scripts/check-lock-version.mjs",
+    "verify": "npm run check:lock-version && npm run typecheck && npm run build && npm run test && npm run test:selftest"
   },
   "peerDependencies": {
     "@immediately-run/sdk": ">=0.49.0"
