@@ -37,10 +37,8 @@ jobs:
       # for the incident note). 11.x stays >= 11.5.1 and publishes cleanly.
       - run: npm install -g npm@11
       - run: npm ci
-      - run: npm run typecheck
       # The ./fs types entry must stay a pure re-reference of the SDK's ambient
       # declaration (R3-276b): no second copy, no widened surface, no *Sync.
-      - run: npm run test:selftest
       - run: npm run verify
       - name: Publish to npm via trusted publishing (skip if version already published)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

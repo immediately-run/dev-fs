@@ -22,7 +22,7 @@
 //
 // Run: `node scripts/check-lock-version.mjs`           → exit 1 on a mismatch
 //      `node scripts/check-lock-version.mjs --self-test` → prove it can fail
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,36 +64,54 @@ const readJson = (p) => {
 };
 
 if (process.argv.includes('--self-test')) {
-  // The SUBPROCESS case: the pure cases above cannot see the main mode's
+  // The SUBPROCESS cases: the pure cases below cannot see the main mode's
   // readJson/exit wiring, so a defanged exit code kept them green (the round-1
-  // finding). This case runs the real script over a real desynced fixture pair
-  // and asserts the exit code — the guard cannot stop guarding silently.
+  // finding). These run the real script over real fixtures and assert the exit
+  // code — the guard cannot stop guarding silently, and a missing input file
+  // fails loudly too (the branch no pure case can reach).
   {
-    const dir = mkdtempSync(join(tmpdir(), 'check-lock-version-'));
-    try {
-      mkdirSync(join(dir, 'scripts'));
-      writeFileSync(join(dir, 'package.json'), JSON.stringify({ version: '2.0.0' }));
-      writeFileSync(
-        join(dir, 'package-lock.json'),
-        JSON.stringify({ version: '1.9.0', packages: { '': { version: '1.9.0' } } }),
-      );
-      const here = dirname(fileURLToPath(import.meta.url));
-      const run = spawnSync(process.execPath, [join(here, 'check-lock-version.mjs')], {
-        cwd: dir,
-        encoding: 'utf8',
-      });
-      const ok =
-        run.status === 1 &&
-        /root version/.test(run.stderr) &&
-        /packages\[""\]\.version/.test(run.stderr);
-      console.log(`  ${ok ? 'ok  ' : 'FAIL'}  the real run over a desynced fixture exits 1 with both problems`);
-      if (!ok) {
-        console.error(run.stderr);
-        process.exit(1);
+    let failed = 0;
+    const here = dirname(fileURLToPath(import.meta.url));
+    const runOver = (name, write) => {
+      const dir = mkdtempSync(join(tmpdir(), 'check-lock-version-'));
+      let verdict;
+      try {
+        write(dir);
+        const run = spawnSync(process.execPath, [join(here, 'check-lock-version.mjs')], {
+          cwd: dir,
+          encoding: 'utf8',
+        });
+        verdict = { status: run.status, stderr: run.stderr };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+      return { name, ...verdict };
+    };
+    const subprocessCases = [
+      runOver('the real run over a desynced fixture exits 1 with both problems', (dir) => {
+        writeFileSync(join(dir, 'package.json'), JSON.stringify({ version: '2.0.0' }));
+        writeFileSync(
+          join(dir, 'package-lock.json'),
+          JSON.stringify({ version: '1.9.0', packages: { '': { version: '1.9.0' } } }),
+        );
+      }),
+      runOver('a missing lock file fails with the check message, not a stack', (dir) => {
+        writeFileSync(join(dir, 'package.json'), JSON.stringify({ version: '2.0.0' }));
+      }),
+    ];
+    const wants = [/root version/, /does not exist/];
+    for (let i = 0; i < subprocessCases.length; i++) {
+      const c = subprocessCases[i];
+      const ok = c.status === 1 && wants[i].test(c.stderr);
+      console.log(`  ${ok ? 'ok  ' : 'FAIL'}  ${c.name}`);
+      if (!ok) {
+        console.error(c.stderr);
+        failed += 1;
+      }
     }
+    // Exit AFTER the fixtures are cleaned (the finally above): process.exit
+    // inside the loop would skip later cleanups.
+    if (failed > 0) process.exit(1);
   }
   const cases = [
     { name: 'in sync passes', pkg: { version: '1.0.0' }, lock: { version: '1.0.0', packages: { '': { version: '1.0.0' } } }, want: 0 },
@@ -121,7 +139,7 @@ if (process.argv.includes('--self-test')) {
     if (!ok) failed += 1;
   }
   console.log(
-    `${failed === 0 ? 'OK' : 'FAILED'}: ${cases.length - failed}/${cases.length} self-test cases (+ the subprocess case above).`,
+    `${failed === 0 ? 'OK' : 'FAILED'}: ${cases.length - failed}/${cases.length} self-test cases (+ the subprocess cases above).`,
   );
   process.exit(failed === 0 ? 0 : 1);
 }
